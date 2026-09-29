@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Flight Simulator</title>
+  <link rel="icon" href="./assets/icon.png">
+  <style>
+    /* Roboto, bundled locally (Apache-2.0) so it works offline — variable
+       weight file covers the 400 & 500 used by the HUD. */
+    @font-face {
+      font-family: 'Roboto';
+      font-style: normal;
+      font-weight: 100 900;
+      font-display: swap;
+      src: url('./assets/roboto-latin.woff2') format('woff2');
+    }
+    html, body { margin: 0; height: 100%; background: #66bfff; overflow: hidden; font-family: system-ui, sans-serif; }
+    #threetiles {
+      display: block; width: 100%; height: 100%; outline: none;
+      touch-action: none; user-select: none; -webkit-user-select: none;
+    }
+    .text { position: absolute; color: var(--hud); white-space: pre; pointer-events: none;
+            text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+    #loading { left: 0; right: 0; text-align: center; top: 45%; font-size: 42px; }
+    #crash { left: 0; right: 0; text-align: center; top: 40%; font-size: 36px; display: none; }
+
+    /* Score panel, top-right — small: score + rings */
+    #scorebar {
+      position: fixed; right: 12px; top: 12px;
+      display: none; align-items: center; gap: 11px;
+      padding: 6px 12px; border-radius: 10px;
+      background: rgba(0, 12, 4, .45); backdrop-filter: blur(6px);
+      border: 1px solid var(--hud);
+      color: var(--hud); text-shadow: 0 0 3px var(--hud-glow), 0 1px 2px rgba(0, 0, 0, .6);
+      font-family: 'Roboto', system-ui, sans-serif;
+    }
+    #scorebar .val { font-size: 15px; font-weight: 700; line-height: 1; }
+    #scorebar .label { font-size: 8px; letter-spacing: .1em; text-transform: uppercase; opacity: .7; margin-top: 2px; }
+    #scorebar .divider { width: 1px; height: 20px; background: var(--hud); opacity: .5; }
+
+    /* F-15 style HUD symbology colour — phosphor green, with a faint glow. */
+    :root { --hud: #3dff5c; --hud-glow: rgba(61, 255, 92, .45); }
+
+    /* Airspeed (left) & altitude (right) moving-scale tapes, set well out from
+       the centre symbology like a fighter HUD. Drawn on canvases in main.ts. */
+    .tape {
+      position: fixed; top: 50%; transform: translateY(-50%);
+      width: 110px; height: min(44vh, 300px);
+      display: none; z-index: 5; pointer-events: none;
+      filter: drop-shadow(0 0 2px var(--hud-glow));
+    }
+    /* …but never pushed past an 8px margin on narrow (portrait) screens */
+    #spdTape { right: min(calc(50% + min(24vw, 330px)), calc(100% - 118px)); }
+    #altTape { left: min(calc(50% + min(24vw, 330px)), calc(100% - 118px)); }
+
+    /* Compass heading tape, top-center. Ticks every 10° (major every 30° with a
+       label), a fixed center pointer + big current-heading readout. Drawn on a
+       canvas in main.ts; this only sizes/places it. */
+    #compass {
+      position: fixed; left: 50%; top: 8px; transform: translateX(-50%);
+      width: min(92vw, 560px); height: 80px;
+      display: none; z-index: 5; pointer-events: none;
+      filter: drop-shadow(0 0 2px var(--hud-glow));
+    }
+
+    /* transient "+5 / +10" popup */
+    #pop {
+      position: fixed; left: 50%; top: 88px; transform: translateX(-50%);
+      font-size: 40px; font-weight: 800; color: var(--hud); opacity: 0;
+      text-shadow: 0 2px 8px rgba(0, 0, 0, .6); pointer-events: none;
+      transition: opacity .15s ease-out;
+    }
+
+    /* Target designator: HUD brackets around the next ring(s) to fly through */
+    #designator {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      display: none; pointer-events: none; z-index: 4;
+      filter: drop-shadow(0 0 2px var(--hud-glow));
+    }
+
+    /* Attitude symbology: W aircraft datum, flight path marker, horizon line
+       and pitch ladder — drawn on a full-screen canvas in main.ts. */
+    #attitude {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      display: none; pointer-events: none; z-index: 5;
+      filter: drop-shadow(0 0 2px var(--hud-glow));
+    }
+
+    /* Login overlay */
+    #login {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex; align-items: center; justify-content: center;
+      background: radial-gradient(120% 120% at 50% 20%, #1a3a5c 0%, #0a1622 70%);
+    }
+    #login .card {
+      width: min(90vw, 380px);
+      background: rgba(255, 255, 255, .06);
+      border: 1px solid rgba(255, 255, 255, .14);
+      border-radius: 18px; padding: 30px 30px 34px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, .45);
+      color: #eaf2fb;
+    }
+    #login h1 { margin: 0 0 4px; font-size: 24px; letter-spacing: .01em; }
+    #login .sub { margin: 0 0 26px; font-size: 13px; opacity: .6; }
+    #login input {
+      width: 100%; box-sizing: border-box; padding: 13px 14px; margin-bottom: 14px;
+      font-size: 15px; color: #fff;
+      background: rgba(255, 255, 255, .08);
+      border: 1px solid rgba(255, 255, 255, .18); border-radius: 10px;
+      outline: none; transition: border-color .15s, background .15s;
+    }
+    #login input:focus { border-color: #4da3ff; background: rgba(77, 163, 255, .12); }
+    #login .err { color: #ff9a9a; font-size: 12px; min-height: 16px; margin: 0 0 10px; }
+    #login button {
+      width: 100%; padding: 13px; margin-top: 4px;
+      font-size: 16px; font-weight: 700; color: #04121f; cursor: pointer;
+      background: linear-gradient(180deg, #6fd0ff, #2ea0f5);
+      border: none; border-radius: 10px; transition: filter .15s, transform .05s;
+    }
+    #login button:hover { filter: brightness(1.06); }
+    #login button:active { transform: translateY(1px); }
+    #login button:disabled { filter: grayscale(.5) brightness(.75); cursor: default; }
+  </style>
+</head>
+<body>
+  <canvas id="threetiles" tabindex="0"></canvas>
+
+  <div id="loading" class="text">Loading terrain… 0%</div>
+  <div id="crash" class="text">You crashed! Press E to continue (−30) or R to restart.</div>
+
+  <div id="scorebar">
+    <div>
+      <div class="val" id="scoreVal">0</div>
+      <div class="label">Score</div>
+    </div>
+    <div class="divider"></div>
+    <div>
+      <div class="val" id="ringsVal">0 / 0</div>
+      <div class="label">Rings</div>
+    </div>
+  </div>
+  <div id="pop"></div>
+
+  <canvas id="compass"></canvas>
+  <canvas id="designator"></canvas>
+
+  <canvas id="spdTape" class="tape"></canvas>
+  <canvas id="altTape" class="tape"></canvas>
+
+  <canvas id="attitude"></canvas>
+
+  <div id="login">
+    <form class="card" id="loginForm" autocomplete="off">
+      <h1>Flight Simulator</h1>
+      <p class="sub"></p>
+      <input id="fullName" name="fullName" type="text" placeholder="Full name" required>
+      <input id="subjectId" name="subjectId" type="text" inputmode="numeric" placeholder="Subject number" required>
+      <div class="err" id="loginErr"></div>
+      <button type="submit" disabled>Loading map… 0%</button>
+    </form>
+  </div>
+
+  <script type="module" src="./demo/main.ts"></script>
+</body>
+</html>

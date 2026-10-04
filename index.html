@@ -180,6 +180,11 @@
     .modalInfo { margin: 0 0 18px; font-size: 15px; line-height: 1.55; color: #98A6B9; white-space: pre-line; }
     .modalAsk { margin: 0 0 20px; font-size: 17px; color: #F4F7FC; }
     .modalRow { display: flex; gap: 12px; }
+    /* Secondary row (the CSV export): same width, visually quieter. */
+    .modalRowCsv { margin-top: 10px; }
+    .modalRowCsv .btnGhost { height: 42px; font-size: 15px; font-weight: 500; }
+    .btnGhost:disabled { opacity: .4; cursor: default; }
+    .btnGhost:disabled:hover { border-color: #3B485A; color: #CDD5E1; }
     .btnPrimary, .btnGhost {
       flex: 1; height: 50px; font-family: inherit; font-size: 17px; font-weight: 600;
       border-radius: 8px; cursor: pointer; transition: background .15s, transform .05s;
@@ -304,11 +309,13 @@
   <div id="pause" class="modal">
     <div class="modalCard">
       <h2 id="pauseTitle">Route paused</h2>
-      <p class="modalInfo" id="pauseInfo"></p>
       <p class="modalAsk">Move on to the next route?</p>
       <div class="modalRow">
         <button type="button" id="pauseYes" class="btnPrimary">Yes</button>
         <button type="button" id="pauseNo" class="btnGhost">No</button>
+      </div>
+      <div class="modalRow modalRowCsv">
+        <button type="button" id="pauseCsv" class="btnGhost">Download CSV</button>
       </div>
     </div>
   </div>

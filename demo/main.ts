@@ -16,7 +16,11 @@
  *      which again starts far back with its own start gate.
  *   5. After the third route a summary appears with a button that downloads
  *      the session as a CSV — one row per route (name, id, region, route,
- *      seconds from the gate to Esc, crashes, score, rings passed/total).
+ *      seconds from the gate to Esc, crashes, score, rings passed/total,
+ *      completed). The same export is also on the **Esc** dialog, so a session
+ *      that ends early still hands over everything measured: the banked routes
+ *      plus the one in the air (completed = 0). That dialog shows NO numbers —
+ *      the participant must not see their own time, score or rings.
  *
  * THE COURSE
  * Every ring faces straight down the course (its opening squares up to the
@@ -28,10 +32,11 @@
  * shown at the top; a fighter-style HUD (W datum, flight path marker, pitch
  * ladder) helps aim through each hoop.
  *
- * Keyboard: **A/D** roll, **Q/E** yaw, **W/S** pitch, **+/-** throttle,
+ * Keyboard: **A/D** roll, **Z/C** yaw, **W/S** pitch, **+/-** throttle,
  * **Esc** stop the route, **1/2/3** jump to a route (a manual override — it
- * does not record a row), **R** restart the route, **E** after a crash
- * continues from the crash spot (costs CRASH_PENALTY points). Touch:
+ * does not record a row), **R** restart the route, **E** continue: after a
+ * crash from the crash spot (costs CRASH_PENALTY points), and in flight a
+ * free attitude recovery that keeps position, speed and score. Touch:
  * one-finger drag steers (right = bank right, down = nose up), two-finger
  * pinch is the throttle, tap resets after a crash.
  */import * as THREE from 'three';
@@ -61,7 +66,7 @@ const THROTTLE_RATE = 0.5;   // how fast the +/- keys move the throttle (per sec
 // (all Thrustmaster, vendor 044f), with the name as a fallback. Stick = roll (X)
 // + pitch (Y), mirroring touch/keys; the two linked throttle levers set speed
 // (+1 = slowest, −1 = fastest). Flip an INVERT flag if a direction feels
-// reversed. Yaw stays on Q/E (the stick's axes here are roll and pitch only).
+// reversed. Yaw stays on Z/C (the stick's axes here are roll and pitch only).
 /** USB product ids (vendor 044f) that are THROTTLES. */
 const GP_THROTTLE_PRODUCTS = ['0404']; // HOTAS Warthog Throttle
 /** USB product ids that are STICKS. */
@@ -138,6 +143,21 @@ const START_GATE_HALF_H = 210;
 /** Lift (m) of the gate's centre above the centerline, if the bottom edge needs
  *  to clear rising ground. */
 const START_GATE_UP = 60;
+/** The gate's frame bars (m). Thin: at this size the frame is already over a
+ *  kilometre wide, so a heavy bar swallows the view through the opening. */
+const START_GATE_BAR = 11;
+/** How far (m) the two posts drop below the frame, towards the ground. They are
+ *  what makes the gate read as a GATE — a flat frame seen from the side is a
+ *  line, while the posts stay solid from any angle and plant it in the
+ *  landscape, so circling around before the start never loses it. Deliberately
+ *  longer than the gate's height above the valley floor: whatever sticks into
+ *  the terrain is hidden by it, so the posts end IN the ground rather than
+ *  stopping in mid-air. */
+const START_GATE_POST_DROP = 2600;
+/** Post radius (m) — matched to the frame bar, so the gate reads as one piece. */
+const START_GATE_POST_R = 11;
+/** Cap height (m) of the "START" banner, which sits just clear of the top bar. */
+const START_GATE_LABEL_H = 100;
 /** Route 1's rings — the original course. */
 const RINGS_1: RingSpec[] = [
   { gap: 0, side: 38, up: 126, size: 'M', kind: 'green' },
@@ -368,12 +388,12 @@ const ringsValEl = document.getElementById('ringsVal')!;
 const routeValEl = document.getElementById('routeVal')!;
 const pauseEl = document.getElementById('pause')!;
 const pauseTitleEl = document.getElementById('pauseTitle')!;
-const pauseInfoEl = document.getElementById('pauseInfo')!;
 const pauseYesEl = document.getElementById('pauseYes') as HTMLButtonElement;
 const pauseNoEl = document.getElementById('pauseNo') as HTMLButtonElement;
 const finishEl = document.getElementById('finish')!;
 const finishInfoEl = document.getElementById('finishInfo')!;
 const downloadCsvEl = document.getElementById('downloadCsv') as HTMLButtonElement;
+const pauseCsvEl = document.getElementById('pauseCsv') as HTMLButtonElement;
 const regionBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('.segBtn'));
 const spdTapeEl = document.getElementById('spdTape') as HTMLCanvasElement;
 const altTapeEl = document.getElementById('altTape') as HTMLCanvasElement;
@@ -451,7 +471,12 @@ interface Ring {
   points: number;
   hazard: boolean;
   mesh: THREE.Mesh;
-  halo: THREE.Mesh;
+  /** The translucent pane inside the opening. The start gate has none: a pane
+   *  across a gateway reads as a surface to avoid, not an opening to fly
+   *  through. */
+  halo: THREE.Mesh | null;
+  /** Extra structure parented to `mesh` (the start gate's posts and banner). */
+  decor: THREE.Group | null;
   done: boolean; // already flown through (scored or penalized) — ignore after
   isStart: boolean; // the start gate: scores nothing, starts the run's clock
   /** Rectangular rings (the start gate) carry their half-sizes; a crossing is
@@ -547,14 +572,86 @@ function squareAnnulus(outerHalf: number, innerHalf: number): THREE.ShapeGeometr
   return new THREE.ShapeGeometry(shape);
 }
 
+/** Free every geometry, material and texture under an object (children too). */
+function disposeTree(root: THREE.Object3D): void {
+  root.traverse((o) => {
+    const geo = (o as Partial<THREE.Mesh>).geometry;
+    const mat = (o as Partial<THREE.Mesh>).material;
+    geo?.dispose();
+    for (const m of Array.isArray(mat) ? mat : mat ? [mat] : []) {
+      (m as THREE.SpriteMaterial).map?.dispose();
+      m.dispose();
+    }
+  });
+}
+
+/** Every material that makes up one ring (frame, pane, gate decoration). */
+function* ringMaterials(ring: Ring): Generator<THREE.Material> {
+  yield ring.mesh.material as THREE.Material;
+  if (ring.halo) yield ring.halo.material as THREE.Material;
+  if (ring.decor) {
+    for (const o of ring.decor.children) yield (o as THREE.Mesh).material as THREE.Material;
+  }
+}
+
+/** A transparent canvas texture holding one word in white (tinted by the
+ *  material's colour), outlined so it stays legible against sky or ground. */
+function wordTexture(text: string): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 1024;
+  c.height = 256;
+  const ctx = c.getContext('2d')!;
+  ctx.font = '700 170px Roboto, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 18;
+  ctx.strokeStyle = 'rgba(0, 0, 0, .75)';
+  ctx.strokeText(text, c.width / 2, c.height / 2);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(text, c.width / 2, c.height / 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/**
+ * What turns the start gate from a rectangle into a gateway: a post under each
+ * side dropping towards the ground, and a "START" banner over the top bar. The
+ * banner is a sprite, so it faces the camera from wherever the aircraft comes
+ * from — the gate is identifiable while manoeuvring around it, not only when
+ * squared up to it.
+ */
+function gateDecor(halfW: number, halfH: number, color: number): THREE.Group {
+  const g = new THREE.Group();
+  const postGeo = new THREE.CylinderGeometry(
+    START_GATE_POST_R, START_GATE_POST_R, START_GATE_POST_DROP, 12, 1, true,
+  );
+  for (const sx of [-1, 1]) {
+    const post = new THREE.Mesh(
+      postGeo.clone(),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, side: THREE.DoubleSide }),
+    );
+    post.position.set(sx * halfW, -halfH - START_GATE_BAR - START_GATE_POST_DROP / 2, 0);
+    g.add(post);
+  }
+  postGeo.dispose();
+  const label = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: wordTexture('START'), color, transparent: true, opacity: 0, depthWrite: false,
+  }));
+  label.scale.set(START_GATE_LABEL_H * 4, START_GATE_LABEL_H, 1);
+  // The glyphs fill the middle ~2/3 of the sprite, so half its height puts the
+  // word's underline a short gap above the bar instead of floating off it.
+  label.position.set(0, halfH + START_GATE_BAR + START_GATE_LABEL_H * 0.42, 0);
+  g.add(label);
+  return g;
+}
+
 /** Drop the current route's rings (geometry included) before building another. */
 function clearCourse(): void {
   for (const ring of rings) {
     ringGroup.remove(ring.mesh);
-    ring.mesh.geometry.dispose();
-    (ring.mesh.material as THREE.Material).dispose();
-    ring.halo.geometry.dispose();
-    (ring.halo.material as THREE.Material).dispose();
+    disposeTree(ring.mesh); // the pane and the gate's decoration hang off it
   }
   rings.length = 0;
   totalTargets = 0;
@@ -585,6 +682,15 @@ function buildCourse(route: Route): void {
   const upInPlane = new THREE.Vector3().crossVectors(courseNormal, right).normalize();
   const quatSquare = new THREE.Quaternion().setFromRotationMatrix(
     new THREE.Matrix4().makeBasis(right, upInPlane, courseNormal),
+  );
+  // quatSquare's in-plane up actually points DOWN (it is the basis that keeps a
+  // square's edges level, and a symmetric square cannot tell). The start gate
+  // can: its posts hang below and its banner sits above. So it gets its own
+  // right-handed basis whose +Y really is up, with +Z flipped so it stays
+  // right-handed. The frame is double-sided, so facing the other way shows
+  // exactly the same gate.
+  const quatGate = new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(right, upInPlane.clone().negate(), courseNormal.clone().negate()),
   );
 
   // Place each ring from the route's table: walk along the centerline by
@@ -618,7 +724,7 @@ function buildCourse(route: Route): void {
   addRing(
     a.clone().addScaledVector(courseNormal, gateAlong).addScaledVector(up, START_GATE_UP),
     gateAlong, Math.min(START_GATE_HALF_W, START_GATE_HALF_H), 0, false, true, COLOR_START,
-    quat, quatSquare, { halfW: START_GATE_HALF_W, halfH: START_GATE_HALF_H },
+    quat, quatGate, { halfW: START_GATE_HALF_W, halfH: START_GATE_HALF_H },
   );
 }
 
@@ -631,14 +737,15 @@ function addRing(
 ): void {
   const tube = Math.max(6, radius * 0.07);
   // Blue targets = round (torus + ring fill); hazards = square; the start gate
-  // = a wide rectangular frame. Squares and rectangles use `quatSquare`, which
-  // keeps their edges level with the course's right/up axes.
+  // = a wide rectangular frame with posts and a banner, and NO pane across the
+  // opening. Squares and rectangles use `quatSquare`, which keeps their edges
+  // level with the course's right/up axes.
   let outlineGeo: THREE.BufferGeometry;
-  let fillGeo: THREE.BufferGeometry;
+  let fillGeo: THREE.BufferGeometry | null;
   if (rect) {
-    const bar = Math.max(14, rect.halfH * 0.07); // frame thickness
+    const bar = START_GATE_BAR; // frame thickness
     outlineGeo = rectAnnulus(rect.halfW + bar, rect.halfH + bar, rect.halfW - bar, rect.halfH - bar);
-    fillGeo = rectAnnulus(rect.halfW * 0.97, rect.halfH * 0.97, rect.halfW * 0.04, rect.halfH * 0.1);
+    fillGeo = null; // an open gateway — nothing drawn inside it
   } else if (hazard) {
     outlineGeo = squareAnnulus(radius + tube, radius - tube);
     fillGeo = squareAnnulus(radius * 0.94, radius * 0.18);
@@ -653,20 +760,26 @@ function addRing(
   mesh.quaternion.copy(hazard || rect ? quatSquare : quat); // opening faces down the course
   mesh.position.copy(center);
   ringGroup.add(mesh);
-  const halo = new THREE.Mesh(
-    fillGeo,
-    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, side: THREE.DoubleSide }),
-  );
-  mesh.add(halo);
+  let halo: THREE.Mesh | null = null;
+  if (fillGeo) {
+    halo = new THREE.Mesh(
+      fillGeo,
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, side: THREE.DoubleSide }),
+    );
+    mesh.add(halo);
+  }
+  // Posts + banner ride on the gate's mesh, so they follow its pose and the
+  // large-world rebase for free.
+  const decor = rect ? gateDecor(rect.halfW, rect.halfH, color) : null;
+  if (decor) mesh.add(decor);
   rings.push({
-    center, s, radius, points, hazard, mesh, halo, done: false, isStart, baseColor: color,
+    center, s, radius, points, hazard, mesh, halo, decor, done: false, isStart, baseColor: color,
     halfW: rect?.halfW, halfH: rect?.halfH,
   });
 }
 
 function setRingColor(ring: Ring, color: number): void {
-  (ring.mesh.material as THREE.MeshBasicMaterial).color.set(color);
-  (ring.halo.material as THREE.MeshBasicMaterial).color.set(color);
+  for (const m of ringMaterials(ring)) (m as THREE.MeshBasicMaterial).color.set(color);
 }
 
 /**
@@ -711,8 +824,13 @@ function startRun(gate: Ring): void {
   runArmed = true;
   runMs = 0;
   runStartedAt = performance.now();
+  // Closing the gate is what hands the HUD over to the first real ring: the
+  // reveal, the compass bearing and the station strip all pick the lowest `s`
+  // that is not done, and the gate's `s` is the lowest of all.
+  gate.done = true;
   setRingColor(gate, COLOR_START_DONE);
-  showPop('GO', '#ffc53d');
+  // No pop here: the gate vanishing is the whole cue. A banner over the HUD at
+  // the moment the measurement starts is one more thing to read while flying.
 }
 
 let popTimer = 0;
@@ -815,28 +933,43 @@ function switchRoute(index: number): void {
 }
 
 /**
- * Continue after a crash (E): same spot over the ground, back up at the
- * course's start altitude, nose level along the course. Rings and score are
- * kept, minus CRASH_PENALTY.
+ * Continue (E) — available at any time, crashed or not. Both cases level the
+ * wings and the nose back along the course and leave the rings untouched; they
+ * differ in what else they touch:
+ *
+ *   crashed    — the aircraft is lifted back to the course's start altitude
+ *                over the same spot, the throttle returns to THROTTLE_START,
+ *                and the run pays CRASH_PENALTY.
+ *   in flight  — a pure attitude recovery: same position, same altitude, same
+ *                airspeed, same throttle, same score. No penalty, because
+ *                nothing was lost — the pilot only straightens out.
  */
 const _contLook = new THREE.Vector3();
-function continueAfterCrash(): void {
+function continueFlight(): void {
+  const wasCrashed = flight.crashed;
   flight.crashed = false;
   flight.angVel.set(0, 0, 0);
-  flight.throttle = THROTTLE_START;
-  // Start altitude, but never inside a hill that rises above it.
-  const ground = terrain.groundHeight(camera.position) ?? 0;
-  camera.position.y = Math.max(courseStart.y + terrain.anchor.worldOffset.y, ground + 150);
+  if (wasCrashed) {
+    flight.throttle = THROTTLE_START;
+    // Start altitude, but never inside a hill that rises above it.
+    const ground = terrain.groundHeight(camera.position) ?? 0;
+    camera.position.y = Math.max(courseStart.y + terrain.anchor.worldOffset.y, ground + 150);
+  }
   camera.up.set(0, 1, 0);
   _contLook.set(courseNormal.x, 0, courseNormal.z).normalize();
   camera.lookAt(_contLook.multiplyScalar(1000).add(camera.position));
   camera.getWorldDirection(forward);
-  flight.vel.copy(forward).multiplyScalar(SPEED_START);
-  flight.speed = SPEED_START;
-  score += CRASH_PENALTY;
-  updateScore();
-  showPop(`${CRASH_PENALTY}`, '#ff6b6b'); // "-30"
-  havePrev = false; // don't count the vertical jump as a ring crossing
+  // A crash recovery relaunches at the spawn airspeed; a mid-air recovery keeps
+  // the speed the pilot already had, so no energy is handed out for free.
+  const speed = wasCrashed ? SPEED_START : flight.speed;
+  flight.vel.copy(forward).multiplyScalar(speed);
+  flight.speed = speed;
+  if (wasCrashed) {
+    score += CRASH_PENALTY;
+    updateScore();
+    showPop(`${CRASH_PENALTY}`, '#ff6b6b'); // "-30"
+    havePrev = false; // don't count the vertical jump as a ring crossing
+  }
   crashEl.style.display = 'none';
 }
 
@@ -982,8 +1115,8 @@ function gatherInputs(): void {
   target.set(0, 0, 0);
   if (keys.has('KeyA')) target.z += FM.ROLL_RATE;
   if (keys.has('KeyD')) target.z -= FM.ROLL_RATE;
-  if (keys.has('KeyQ')) target.y += FM.YAW_RATE;
-  if (keys.has('KeyE')) target.y -= FM.YAW_RATE;
+  if (keys.has('KeyZ')) target.y += FM.YAW_RATE;
+  if (keys.has('KeyC')) target.y -= FM.YAW_RATE;
   if (keys.has('KeyW')) target.x -= FM.PITCH_RATE;
   if (keys.has('KeyS')) target.x += FM.PITCH_RATE;
   target.z -= FM.ROLL_RATE * touchSteer.x;
@@ -1076,9 +1209,8 @@ function revealUpdate(): void {
   for (const ring of rings) if (!ring.done && ring.s < nextS) nextS = ring.s;
   for (const ring of rings) {
     if (ring.isStart) { // always solid until crossed — it must never be missed
-      const op = ring.done ? 0 : 1;
-      (ring.mesh.material as THREE.MeshBasicMaterial).opacity = op;
-      (ring.halo.material as THREE.MeshBasicMaterial).opacity = op * 0.12;
+      const op = ring.done ? 0 : 1; // crossed → the gate is behind us, hide it
+      for (const m of ringMaterials(ring)) m.opacity = op;
       continue;
     }
     const ahead = ring.s - sPlane;
@@ -1097,7 +1229,7 @@ function revealUpdate(): void {
     const isNext = !ring.done && ring.s === nextS;
     const { outline, fill } = OPACITY[ring.hazard ? 'red' : 'blue'][isNext ? 'next' : 'later'];
     (ring.mesh.material as THREE.MeshBasicMaterial).opacity = op * outline;
-    (ring.halo.material as THREE.MeshBasicMaterial).opacity = op * fill;
+    if (ring.halo) (ring.halo.material as THREE.MeshBasicMaterial).opacity = op * fill;
   }
 }
 
@@ -1575,9 +1707,9 @@ function pauseRoute(): void {
   paused = true;
   const r = routes()[routeIndex];
   pauseTitleEl.textContent = `${r.name} stopped`;
-  pauseInfoEl.textContent = runArmed
-    ? `Time ${courseElapsed().toFixed(1)} s · score ${score} · rings ${targetsCleared}/${totalTargets} · crashes ${crashes}`
-    : 'The start gate has not been crossed yet, so nothing was measured on this route.';
+  // Deliberately no numbers here: the dialog must not show the participant
+  // their time, score or rings. The export is the only way out of the data.
+  pauseCsvEl.disabled = !haveCsvData();
   pauseEl.classList.add('is-open');
 }
 
@@ -1627,20 +1759,57 @@ function recordRoute(): void {
   } catch { /* private mode / storage disabled — the in-memory rows still stand */ }
 }
 
-const CSV_HEADER = ['name', 'subject_id', 'region', 'route', 'seconds', 'crashes', 'score', 'rings_passed', 'rings_total'];
+const CSV_HEADER = [
+  'name', 'subject_id', 'region', 'route', 'seconds', 'crashes', 'score', 'rings_passed', 'rings_total',
+  'completed', // 1 = the route was finished and banked, 0 = exported mid-flight
+];
 /** RFC-4180 quoting: wrap in quotes and double any quote inside. */
 function csvCell(v: string | number): string {
   const t = String(v);
   return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
 }
+/** The live attempt, as a row — only once the start gate has armed the clock. */
+function liveRow(): RunRow | null {
+  if (!runArmed) return null;
+  return {
+    name: participant.name,
+    subject: participant.subject,
+    region: regionId,
+    route: routeIndex + 1,
+    seconds: courseElapsed(),
+    crashes,
+    score,
+    rings: targetsCleared,
+    targets: totalTargets,
+  };
+}
+
+/**
+ * Everything measured so far: the banked rows, plus the route in the air right
+ * now (flagged completed = 0) so an export mid-session never loses it. The live
+ * row is computed on demand, never pushed into sessionRows, so banking that
+ * same route later with Esc → Yes cannot duplicate it.
+ */
+function csvRows(): { row: RunRow; completed: boolean }[] {
+  const rows = sessionRows.map((row) => ({ row, completed: true }));
+  const live = liveRow();
+  if (live) rows.push({ row: live, completed: false });
+  return rows;
+}
+
+/** Is there anything worth exporting? Drives the CSV button's enabled state. */
+const haveCsvData = (): boolean => csvRows().length > 0;
+
 function sessionCsv(): string {
-  const rows = sessionRows.map((r) => [
+  const rows = csvRows().map(({ row: r, completed }) => [
     r.name, r.subject, r.region, r.route, r.seconds.toFixed(2), r.crashes, r.score, r.rings, r.targets,
+    completed ? 1 : 0,
   ].map(csvCell).join(','));
   return [CSV_HEADER.join(','), ...rows].join('\r\n') + '\r\n';
 }
 
 function downloadCsv(): void {
+  if (!haveCsvData()) { showPop('Nothing measured yet', '#ff6b6b'); return; }
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
   const safe = (participant?.subject || 'participant').replace(/[^\w-]/g, '_');
   const blob = new Blob([sessionCsv()], { type: 'text/csv;charset=utf-8' });
@@ -1652,11 +1821,16 @@ function downloadCsv(): void {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  // Hand the focus back, so Space/Enter don't re-trigger the button instead of
+  // reaching the simulator.
+  if (!paused) canvas.focus();
 }
+
 
 pauseYesEl.addEventListener('click', nextRoute);
 pauseNoEl.addEventListener('click', resumeRoute);
 downloadCsvEl.addEventListener('click', downloadCsv);
+pauseCsvEl.addEventListener('click', downloadCsv);
 
 // -- frame loop --------------------------------------------------------------
 
@@ -1675,8 +1849,9 @@ function frame(now: number): void {
     else if (justPressed.has('Digit1') || justPressed.has('Numpad1')) switchRoute(0);
     else if (justPressed.has('Digit2') || justPressed.has('Numpad2')) switchRoute(1);
     else if (justPressed.has('Digit3') || justPressed.has('Numpad3')) switchRoute(2);
-    // E is the physical key (KeyE), so it works on Hebrew (ק) and English layouts.
-    else if (flight.crashed && justPressed.has('KeyE')) continueAfterCrash();
+    // E continues at any time — after a crash, or as a mid-air attitude recovery.
+    // It is the physical key (KeyE), so Hebrew (ק) and English layouts both work.
+    else if (justPressed.has('KeyE')) continueFlight();
     // Sample inputs once, then advance the physics in fixed PHYS_DT sub-steps so
     // the result is frame-rate independent (the leftover time carries over).
     gatherInputs();

@@ -21,8 +21,11 @@ npm install
 npm run dev          # opens the Vite dev server
 ```
 
-Flies over the Grand Canyon. **A/D** roll, **Q/E** yaw, **W/S** pitch, **+/-** throttle, **R** reset after
-crashing into the terrain. Tiles come straight from the providers via `fetch` (the browser's HTTP cache applies;
+Flies over the Grand Canyon. **A/D** roll, **Z/C** yaw, **W/S** pitch, **+/-** throttle, **E** level out /
+continue after a crash, **Esc** stop the route, **1/2/3** switch route, **R** reset after
+crashing into the terrain. The **Esc** dialog carries a
+**Download CSV** button, so the session can be exported at any point — the finished routes plus the one still
+in the air. Tiles come straight from the providers via `fetch` (the browser's HTTP cache applies;
 Esri imagery serves JPEG despite the endpoint name — decoding handles both).
 
 `npm run build` produces a static, deployable bundle of the demo in `dist-demo/`.

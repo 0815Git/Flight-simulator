@@ -128,7 +128,7 @@ export const BANK_TURN = {
  *  SIDESLIP — the flight path re-aligns sideways with the nose.
  * ═══════════════════════════════════════════════════════════════════════════
  * Without this, a sideways gap between the W (nose) and the flight path marker
- * (e.g. after yawing with Q/E) never closed. Now the nose weathervanes toward
+ * (e.g. after yawing with Z/C) never closed. Now the nose weathervanes toward
  * the direction of motion (like a real jet's fin), so the gap closes. The path
  * is not forced, so a banked jet still sinks — its nose just follows it down.
  * Up/down gap (angle of attack) is NOT touched: that one is real and needed.

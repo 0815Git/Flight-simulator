@@ -87,40 +87,116 @@
       filter: drop-shadow(0 0 2px var(--hud-glow));
     }
 
-    /* Login overlay */
+    /* Login overlay — flight-instrument themed, see design spec */
     #login {
       position: fixed; inset: 0; z-index: 10;
       display: flex; align-items: center; justify-content: center;
-      background: radial-gradient(120% 120% at 50% 20%, #1a3a5c 0%, #0a1622 70%);
+      padding: 24px 16px;
+      box-sizing: border-box;
+      overflow: auto;                 /* short screens: keep fields reachable */
+      background: #0B1220;
+      direction: ltr;
+    }
+    /* Decorative attitude-indicator symbology behind the card */
+    #loginBg {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      pointer-events: none; z-index: 0;
     }
     #login .card {
-      width: min(90vw, 380px);
-      background: rgba(255, 255, 255, .06);
-      border: 1px solid rgba(255, 255, 255, .14);
-      border-radius: 18px; padding: 30px 30px 34px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, .45);
-      color: #eaf2fb;
+      position: relative; z-index: 1;
+      width: 100%; max-width: 510px; box-sizing: border-box;
+      padding: 36px;
+      background: #141E2D;
+      border: 1px solid #303C4D;
+      border-radius: 16px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .45);
+      color: #F4F7FC;
+      text-align: left;
+      font-family: 'Roboto', system-ui, sans-serif;
     }
-    #login h1 { margin: 0 0 4px; font-size: 24px; letter-spacing: .01em; }
-    #login .sub { margin: 0 0 26px; font-size: 13px; opacity: .6; }
+    #login .planeIcon { display: block; width: 48px; height: 48px; color: #398BFA; }
+    #login h1 {
+      margin: 18px 0 0; font-size: 36px; font-weight: 700;
+      line-height: 1.2; color: #F4F7FC; letter-spacing: 0;
+    }
+    #login .sub { margin: 8px 0 0; font-size: 18px; font-weight: 400; color: #98A6B9; }
+    #login .fields { margin-top: 28px; }
+    #login label {
+      display: block; font-size: 16px; color: #CDD5E1; margin-bottom: 8px;
+    }
+    #login .field + .field { margin-top: 22px; }
     #login input {
-      width: 100%; box-sizing: border-box; padding: 13px 14px; margin-bottom: 14px;
-      font-size: 15px; color: #fff;
-      background: rgba(255, 255, 255, .08);
-      border: 1px solid rgba(255, 255, 255, .18); border-radius: 10px;
-      outline: none; transition: border-color .15s, background .15s;
+      display: block; width: 100%; box-sizing: border-box;
+      height: 50px; padding: 0 14px; margin: 0;
+      font: inherit; font-size: 16px; color: #F4F7FC;
+      background: #0F1724;
+      border: 1px solid #3B485A; border-radius: 8px;
+      outline: none; transition: border-color .15s, box-shadow .15s;
     }
-    #login input:focus { border-color: #4da3ff; background: rgba(77, 163, 255, .12); }
-    #login .err { color: #ff9a9a; font-size: 12px; min-height: 16px; margin: 0 0 10px; }
+    #login input:focus-visible,
+    #login input:focus {
+      border-color: #398BFA; box-shadow: 0 0 0 3px rgba(57, 139, 250, .25);
+    }
+    #login .err { color: #ff9a9a; font-size: 14px; margin: 12px 0 0; }
+    #login .err:empty { display: none; }
     #login button {
-      width: 100%; padding: 13px; margin-top: 4px;
-      font-size: 16px; font-weight: 700; color: #04121f; cursor: pointer;
-      background: linear-gradient(180deg, #6fd0ff, #2ea0f5);
-      border: none; border-radius: 10px; transition: filter .15s, transform .05s;
+      display: block; width: 100%; height: 54px; margin-top: 30px; padding: 0;
+      font-family: inherit; font-size: 18px; font-weight: 600; color: #fff;
+      cursor: pointer; background: #398BFA;
+      border: none; border-radius: 8px;
+      transition: background .15s, transform .05s, box-shadow .15s;
     }
-    #login button:hover { filter: brightness(1.06); }
-    #login button:active { transform: translateY(1px); }
-    #login button:disabled { filter: grayscale(.5) brightness(.75); cursor: default; }
+    #login button:hover:not(:disabled) { background: #4C97FB; }
+    #login button:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(57, 139, 250, .4); }
+    #login button:active:not(:disabled) { background: #2E7BE0; transform: translateY(1px); }
+    #login button:disabled { background: #2B3F5C; color: #9FB3CC; cursor: default; }
+    /* Region segmented control on the login card */
+    #login .label { display: block; font-size: 16px; color: #CDD5E1; margin-bottom: 8px; }
+    #login .seg { display: flex; gap: 10px; }
+    #login .segBtn {
+      flex: 1; height: 50px; margin: 0; padding: 0;
+      font-family: inherit; font-size: 16px; font-weight: 600; color: #CDD5E1;
+      background: #0F1724; border: 1px solid #3B485A; border-radius: 8px;
+      cursor: pointer; transition: background .15s, border-color .15s, color .15s;
+    }
+    #login .segBtn:hover { border-color: #55657b; }
+    #login .segBtn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(57, 139, 250, .35); }
+    #login .segBtn.is-on { background: #16304f; border-color: #398BFA; color: #F4F7FC; }
+
+    /* Pause / finish dialogs — shown over a frozen simulator */
+    .modal {
+      position: fixed; inset: 0; z-index: 30; display: none;
+      align-items: center; justify-content: center; padding: 24px 16px;
+      box-sizing: border-box; background: rgba(6, 12, 22, .72);
+      font-family: 'Roboto', system-ui, sans-serif; direction: ltr;
+    }
+    .modal.is-open { display: flex; }
+    .modalCard {
+      width: 100%; max-width: 440px; box-sizing: border-box; padding: 28px;
+      background: #141E2D; border: 1px solid #303C4D; border-radius: 16px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .5); color: #F4F7FC; text-align: left;
+    }
+    .modalCard h2 { margin: 0 0 10px; font-size: 24px; font-weight: 700; }
+    .modalInfo { margin: 0 0 18px; font-size: 15px; line-height: 1.55; color: #98A6B9; white-space: pre-line; }
+    .modalAsk { margin: 0 0 20px; font-size: 17px; color: #F4F7FC; }
+    .modalRow { display: flex; gap: 12px; }
+    .btnPrimary, .btnGhost {
+      flex: 1; height: 50px; font-family: inherit; font-size: 17px; font-weight: 600;
+      border-radius: 8px; cursor: pointer; transition: background .15s, transform .05s;
+    }
+    .btnPrimary { color: #fff; background: #398BFA; border: none; }
+    .btnPrimary:hover { background: #4C97FB; }
+    .btnPrimary:active { transform: translateY(1px); }
+    .btnGhost { color: #CDD5E1; background: transparent; border: 1px solid #3B485A; }
+    .btnGhost:hover { border-color: #55657b; color: #F4F7FC; }
+    .btnGhost:active { transform: translateY(1px); }
+    .btnPrimary:focus-visible, .btnGhost:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(57, 139, 250, .4); }
+
+    @media (max-width: 560px) {
+      #login .card { padding: 24px; }
+      #login h1 { font-size: 30px; }
+      #login .sub { font-size: 16px; }
+    }
   </style>
 </head>
 <body>
@@ -139,6 +215,11 @@
       <div class="val" id="ringsVal">0 / 0</div>
       <div class="label">Rings</div>
     </div>
+    <div class="divider"></div>
+    <div>
+      <div class="val" id="routeVal">1</div>
+      <div class="label">Route</div>
+    </div>
   </div>
   <div id="pop"></div>
 
@@ -151,14 +232,95 @@
   <canvas id="attitude"></canvas>
 
   <div id="login">
+    <!-- Decorative attitude/pitch-ladder symbology. Purely visual. -->
+    <svg id="loginBg" viewBox="0 0 1680 940" preserveAspectRatio="xMidYMid slice"
+         aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+      <g fill="none" stroke="#223346" stroke-width="2" stroke-linecap="round">
+        <!-- roll-scale arc + centre pointer -->
+        <path d="M 416 510 A 420 420 0 0 1 1256 510" stroke-width="2.5"/>
+        <path d="M 836 30 L 836 905"/>
+        <path d="M 812 62 L 860 62 L 836 94 Z" stroke-width="2.5"/>
+        <!-- arc ticks -->
+        <path d="M 700 112 L 692 90 M 976 112 L 984 90
+                 M 596 170 L 583 151 M 1080 170 L 1093 151
+                 M 470 330 L 448 322 M 1206 330 L 1228 322
+                 M 436 420 L 413 416 M 1240 420 L 1263 416"/>
+        <!-- horizon -->
+        <path d="M 0 533 L 1680 533" stroke-width="1.5"/>
+        <!-- pitch rungs, above the horizon -->
+        <path d="M 700 165 L 782 165 M 890 165 L 972 165"/>
+        <path d="M 366 397 L 400 397 M 462 397 L 560 397
+                 M 1112 397 L 1210 397 M 1272 397 L 1306 397"/>
+        <!-- pitch rungs, below the horizon -->
+        <path d="M 366 577 L 400 577 M 1272 577 L 1306 577"/>
+        <path d="M 700 833 L 782 833 M 890 833 L 972 833"/>
+        <path d="M 740 886 L 790 886 M 882 886 L 932 886"/>
+        <!-- terrain outline either side of the horizon -->
+        <path d="M 0 533 L 96 524 L 150 496 L 196 512 L 248 486 L 292 507 L 352 525 L 404 533"
+              stroke-width="1.5"/>
+        <path d="M 1680 533 L 1588 523 L 1534 494 L 1486 512 L 1436 487 L 1390 508 L 1330 526 L 1278 533"
+              stroke-width="1.5"/>
+      </g>
+      <g fill="#28394F" font-family="Roboto, system-ui, sans-serif" font-size="26" text-anchor="middle">
+        <text x="662" y="174">20</text>
+        <text x="1008" y="174">20</text>
+        <text x="430" y="406">10</text>
+        <text x="1242" y="406">10</text>
+        <text x="663" y="842">20</text>
+        <text x="1005" y="842">20</text>
+      </g>
+    </svg>
+
     <form class="card" id="loginForm" autocomplete="off">
+      <svg class="planeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2.5 L12.9 9 L21 13.9 V16 L12.9 14.3 V18.6 L15.4 20.4 V21.5 L12 20.4 L8.6 21.5 V20.4 L11.1 18.6 V14.3 L3 16 V13.9 L11.1 9 Z"/>
+      </svg>
       <h1>Flight Simulator</h1>
-      <p class="sub"></p>
-      <input id="fullName" name="fullName" type="text" placeholder="Full name" required>
-      <input id="subjectId" name="subjectId" type="text" inputmode="numeric" placeholder="Subject number" required>
+      <p class="sub">Enter participant details to begin</p>
+      <div class="fields">
+        <div class="field">
+          <span class="label" id="regionLabel">Region</span>
+          <div class="seg" role="radiogroup" aria-labelledby="regionLabel">
+            <button type="button" class="segBtn is-on" data-region="north" aria-checked="true" role="radio">North</button>
+            <button type="button" class="segBtn" data-region="south" aria-checked="false" role="radio">South</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="fullName">Full name</label>
+          <input id="fullName" name="fullName" type="text" required>
+        </div>
+        <div class="field">
+          <label for="subjectId">Participant ID</label>
+          <input id="subjectId" name="subjectId" type="text" inputmode="numeric" required>
+        </div>
+      </div>
       <div class="err" id="loginErr"></div>
       <button type="submit" disabled>Loading map… 0%</button>
     </form>
+  </div>
+
+  <div id="pause" class="modal">
+    <div class="modalCard">
+      <h2 id="pauseTitle">Route paused</h2>
+      <p class="modalInfo" id="pauseInfo"></p>
+      <p class="modalAsk">Move on to the next route?</p>
+      <div class="modalRow">
+        <button type="button" id="pauseYes" class="btnPrimary">Yes</button>
+        <button type="button" id="pauseNo" class="btnGhost">No</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="finish" class="modal">
+    <div class="modalCard">
+      <h2>Session complete</h2>
+      <p class="modalInfo" id="finishInfo"></p>
+      <div class="modalRow">
+        <button type="button" id="downloadCsv" class="btnPrimary">Download CSV</button>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="./demo/main.ts"></script>

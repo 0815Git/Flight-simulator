@@ -1,22 +1,40 @@
 /**
  * Israel Flight Simulator — a ring-course game built on the threetiles engine.
  *
- * A login screen collects the participant's full name and subject number, then
- * the simulator anchors the world over Kiryat Shmona and lays out a dense
- * course of rings running north toward Lake Qaraoun. Every ring
- * faces straight down the course (its opening squares up to the aircraft's
- * nose); the rings only "crab" left/right and up/down along the way, they
- * never rotate away. Rings are orange until flown through, then turn green.
- * A large ring scores 5 points, a small precision ring scores 10. The running
- * score is shown at the top; a fighter-style HUD (W datum, flight path marker,
- * pitch ladder) helps aim through each hoop.
+ * SESSION FLOW
+ *   1. The login screen collects the participant's name and id, and whether
+ *      they fly the NORTH region (Hula valley / Bekaa) or the SOUTH one (Eilat
+ *      mountains). The world is anchored on the chosen region and its terrain
+ *      streams while the details are typed.
+ *   2. "Start session" drops the aircraft SPAWN_BACK metres behind the course,
+ *      with a lead-in to settle down. Nothing is measured yet.
+ *   3. Crossing the wide amber START GATE on the centerline begins the run:
+ *      the clock starts and everything from there is recorded.
+ *   4. **Esc** stops the route. The simulator freezes exactly where it is and
+ *      asks whether to move on. "No" resumes from the identical state; "Yes"
+ *      banks the route's row and loads the next route of the same region,
+ *      which again starts far back with its own start gate.
+ *   5. After the third route a summary appears with a button that downloads
+ *      the session as a CSV — one row per route (name, id, region, route,
+ *      seconds from the gate to Esc, crashes, score, rings passed/total).
+ *
+ * THE COURSE
+ * Every ring faces straight down the course (its opening squares up to the
+ * aircraft's nose); the rings only "crab" left/right and up/down along the way,
+ * they never rotate away. Rings are scored like a target board: a large ring is
+ * worth up to 5 points and a small precision ring up to 10, but only a crossing
+ * through the middle pays the full amount — it falls off towards the rim. A red
+ * square hazard costs 10 wherever it is entered. The score, rings and route are
+ * shown at the top; a fighter-style HUD (W datum, flight path marker, pitch
+ * ladder) helps aim through each hoop.
  *
  * Keyboard: **A/D** roll, **Q/E** yaw, **W/S** pitch, **+/-** throttle,
- * **R** restart the course, **E** after a crash continues from the crash spot
- * (costs CRASH_PENALTY points). Touch: one-finger drag steers (right = bank right,
- * down = nose up), two-finger pinch is the throttle, tap resets after a crash.
- */
-import * as THREE from 'three';
+ * **Esc** stop the route, **1/2/3** jump to a route (a manual override — it
+ * does not record a row), **R** restart the route, **E** after a crash
+ * continues from the crash spot (costs CRASH_PENALTY points). Touch:
+ * one-finger drag steers (right = bank right, down = nose up), two-finger
+ * pinch is the throttle, tap resets after a crash.
+ */import * as THREE from 'three';
 import { Terrain, ZOOM_LEVELS, type WorldConfig, worldFromLatLon } from '../src';
 import { FM, SPEED_RULE, applyStick, speedRuleTrimThrottle, stepDynamics } from './flight';
 
@@ -35,14 +53,24 @@ const SPEED_START = 160; // initial airspeed at spawn (m/s) — a front-side cru
 const THROTTLE_START = SPEED_RULE.enabled ? speedRuleTrimThrottle() : 0.4;
 const THROTTLE_RATE = 0.5;   // how fast the +/- keys move the throttle (per second)
 
-// -- Gamepad mapping (Thrustmaster HOTAS Warthog) ----------------------------
-// The Warthog is TWO separate USB devices, each with its own axes numbered from
-// 0. We tell them apart by their id: the throttle's id contains GP_THROTTLE_ID,
-// anything else is treated as the stick. Axis indices below are per-device, as
-// read from Gamepad Tester. Stick = roll (X) + pitch (Y), mirroring touch/keys;
-// the two linked throttle levers set speed (+1 = slowest, −1 = fastest). Flip an
-// INVERT flag if a direction feels reversed. Yaw stays on Q/E (stick has 2 axes).
-const GP_THROTTLE_ID = 'throttle';  // substring (lowercase) in the throttle's id
+// -- Gamepad mapping (HOTAS: a stick and a throttle on separate USB ports) ---
+// Each device has its OWN axes numbered from 0, so the indices below are read
+// per device. Telling them apart by name is unreliable — the Warthog's stick is
+// called "Joystick - HOTAS Warthog", with no "throttle" in it, and a stick from
+// another set has another name again — so they are matched by USB product id
+// (all Thrustmaster, vendor 044f), with the name as a fallback. Stick = roll (X)
+// + pitch (Y), mirroring touch/keys; the two linked throttle levers set speed
+// (+1 = slowest, −1 = fastest). Flip an INVERT flag if a direction feels
+// reversed. Yaw stays on Q/E (the stick's axes here are roll and pitch only).
+/** USB product ids (vendor 044f) that are THROTTLES. */
+const GP_THROTTLE_PRODUCTS = ['0404']; // HOTAS Warthog Throttle
+/** USB product ids that are STICKS. */
+const GP_STICK_PRODUCTS = ['0402', '0422']; // Warthog Joystick, Solaris Base
+/** If several sticks are plugged in, this one wins. */
+const GP_STICK_PREFERRED = '0422'; // Solaris Base
+/** Fallback for any device not in the lists above: a name containing this is a
+ *  throttle, anything else is a stick. */
+const GP_THROTTLE_ID = 'throttle';
 const GP_AXIS_ROLL = 0;    // stick device: left/right → roll  (like A/D)
 const GP_AXIS_PITCH = 1;   // stick device: fwd/back   → pitch (like W/S)
 const GP_AXIS_THR_A = 2;   // throttle device: lever A ┐ linked pair, averaged
@@ -51,17 +79,14 @@ const GP_DEADZONE = 0.06;  // ignore tiny stick noise near centre
 const GP_INVERT_ROLL = false;
 const GP_INVERT_PITCH = false;
 
-/** Where the aircraft spawns: over the south of the Kinneret, facing north. */
-const START = { lat: 33.20796358450835, lon: 35.56987082847023, altitude: 600 };
-
 /**
- * Course endpoints: the ring path runs from Kiryat Shmona up to Lake Qaraoun.
- * The straight line between them is the "centerline" (the 0 reference); every
- * ring in COURSE is placed as an offset from it. (PATH_END only sets the
- * direction; the rings extend as far as their cumulative gaps reach.)
+ * Two REGIONS, picked on the login screen: north (the Hula valley up the Bekaa)
+ * and south (the Eilat mountains), each holding the same three routes in a
+ * different place. The world is anchored at the region's own anchor point —
+ * Mercator scale changes with latitude, so one anchor cannot serve both. The
+ * region is therefore chosen before the run starts, not during it.
  */
-const PATH_START = { lat: 33.20796358450835, lon: 35.56987082847023, alt: 600 }; // Kiryat Shmona
-const PATH_END = { lat: 33.571503158789284, lon: 35.696654819118166, alt: 1800 }; // Lake Qaraoun
+type RegionId = 'north' | 'south';
 
 /** Ring size → radius (m). Bigger = easier (+5); small/precision = +10. HAZ = red. */
 type RingSize = 'XL' | 'L' | 'M' | 'S' | 'XS' | 'HAZ';
@@ -69,46 +94,69 @@ const SIZE_RADIUS: Record<RingSize, number> = { XL: 205, L: 140, M: 92, S: 56, X
 const HAZARD_POINTS = -10; // red ring flown through
 
 /**
- * THE COURSE — one row per ring, easy to hand-edit. Fields:
+ * THE RING TABLES — one row per ring, easy to hand-edit. There is one table
+ * per route (RINGS_1 / RINGS_2 / RINGS_3 below) and they are independent, so
+ * editing one changes only that route. Fields:
  *   gap  = distance (m) along the course from the PREVIOUS ring (gap 0 ≈ a ring
  *          stacked/beside the previous one at the same station — a pair).
  *   side = offset from the centerline: + = right, − = left (m).
  *   up   = offset from the centerline: + = above, − = below (m).
  *   size = XL | L | M | S | XS  (green) or HAZ (red).
  *   kind = 'green' (fly through, scores) or 'red' (avoid, −10 if entered).
- * Green points come from size automatically (XL/L/M = +5, S/XS = +10).
- * Reorder / edit / add / delete rows freely; the course updates directly.
+ * Green points come from size automatically (XL/L/M = up to +5, S/XS = up to
+ * +10) and are then scaled by how centred the crossing was — see
+ * BULLSEYE_FRACTION / RIM_SHARE.
+ * Reorder / edit / add / delete rows freely; that route updates directly. The
+ * gaps are relative, so they are stretched to fit whatever length the route's
+ * start/end coordinates give — a table works at any route length.
  */
 interface RingSpec { gap: number; side: number; up: number; size: RingSize; kind: 'green' | 'red' }
-/** Distance (m) from the course start to the LAST station — it ends at Lake
- *  Qaraoun. The gaps below are stretched proportionally so the course always
- *  ends exactly here: deleting rows spreads the remaining rings out, adding
- *  rows packs them tighter. Rings sharing a station (gap 0) stay side by side. */
-const COURSE_END = 39512;
-/** Flight time (s, at SPEED_START) from the spawn point to the first station —
- *  a lead-in to settle before the rings begin. Places the first station, so
- *  the first row's gap below is ignored. */
-const FIRST_RING_SECONDS = 15;
-/** The spawn sits this far (m) behind the course start. */
-const SPAWN_BACK = 250;
-const COURSE: RingSpec[] = [
+/** Where the FIRST ring sits (m from the course start). Independent of the
+ *  spawn: moving the spawn back does not move the rings. The first row's gap in
+ *  the tables below is ignored — this places it. */
+const FIRST_RING_ALONG = 2150;
+/** How far (m) BEHIND the course start the aircraft spawns. This is the only
+ *  lead-in knob: raise it to give the participant more room to settle before
+ *  reaching the start gate; the course itself does not move. */
+const SPAWN_BACK = 2500;
+
+/**
+ * START GATE — a single wide gate on the centerline, flown through shortly
+ * before the first ring. It scores nothing: crossing it is what starts the run
+ * for measurement purposes (see `courseStartedAt`), so every participant is
+ * timed from the same point in space rather than from the spawn.
+ */
+/** How far (m) before the FIRST RING the start gate sits. */
+const START_GATE_BACK = 900;
+/** Half-width and half-height (m) of the start gate's rectangle. It is drawn
+ *  as a wide rectangular frame rather than a ring so it reads as a gateway, and
+ *  it is deliberately huge: it should be impossible to miss or to have to aim
+ *  for. Widening it costs nothing; raising the height lowers its bottom edge
+ *  towards the ground, so re-check the terrain after changing it. */
+const START_GATE_HALF_W = 520;
+const START_GATE_HALF_H = 210;
+/** Lift (m) of the gate's centre above the centerline, if the bottom edge needs
+ *  to clear rising ground. */
+const START_GATE_UP = 60;
+/** Route 1's rings — the original course. */
+const RINGS_1: RingSpec[] = [
   { gap: 0, side: 38, up: 126, size: 'M', kind: 'green' },
   { gap: 0, side: -211, up: 186, size: 'HAZ', kind: 'red' },
-  { gap: 3843, side: -198, up: -140, size: 'S', kind: 'green' },
-  { gap: 0, side: 15, up: -110, size: 'HAZ', kind: 'red' },
-  { gap: 0, side: -411, up: -180, size: 'HAZ', kind: 'red' },
+  { gap: 3843, side: -198, up: -120, size: 'S', kind: 'green' },
+  { gap: 0, side: 15, up: -60, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: -411, up: -60, size: 'HAZ', kind: 'red' },
   { gap: 1815, side: 250, up: 170, size: 'L', kind: 'green' },
-  { gap: 2993, side: -410, up: -230, size: 'XL', kind: 'green' },
+  { gap: 2993, side: -410, up: -180, size: 'XL', kind: 'green' },
   { gap: 4066, side: 200, up: 130, size: 'XS', kind: 'green' },
   { gap: 0, side: 391, up: 160, size: 'HAZ', kind: 'red' },
   { gap: 0, side: 9, up: 90, size: 'HAZ', kind: 'red' },
-  { gap: 2107, side: -360, up: -190, size: 'S', kind: 'green' },
-  { gap: 0, side: -147, up: -160, size: 'HAZ', kind: 'red' },
-  { gap: 0, side: -573, up: -230, size: 'HAZ', kind: 'red' },
+  { gap: 2107, side: -360, up: 60, size: 'S', kind: 'green' },
+  { gap: 0, side: -147, up: 80, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: -573, up: 120, size: 'HAZ', kind: 'red' },
   { gap: 2174, side: 280, up: 240, size: 'L', kind: 'green' },
-  { gap: 3888, side: -440, up: -110, size: 'S', kind: 'green' },
-  { gap: 0, side: -227, up: -80, size: 'HAZ', kind: 'red' },
-  { gap: 0, side: -653, up: -150, size: 'HAZ', kind: 'red' },
+  { gap: 3888, side: -440, up: 10, size: 'S', kind: 'green' },
+  { gap: 0, side: -227, up: 80, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: -653, up: 20, size: 'HAZ', kind: 'red' },
   { gap: 2611, side: 190, up: 210, size: 'L', kind: 'green' },
   { gap: 1643, side: -330, up: -140, size: 'L', kind: 'green' },
   { gap: 3357, side: 250, up: 170, size: 'M', kind: 'green' },
@@ -116,10 +164,170 @@ const COURSE: RingSpec[] = [
   { gap: 4521, side: -410, up: -230, size: 'XL', kind: 'green' },
   { gap: 2620, side: 200, up: 130, size: 'L', kind: 'green' },
 ];
+/**
+ * Route 2's rings: route 1 mirrored left↔right, with the vertical offsets
+ * halved — a flatter course that banks the other way. Same 23 stations and the
+ * same mix of sizes as route 1, so the maximum score is identical.
+ */
+const RINGS_2: RingSpec[] = [
+  { gap: 0, side: -38, up: 63, size: 'M', kind: 'green' },
+  { gap: 0, side: 211, up: 93, size: 'HAZ', kind: 'red' },
+  { gap: 3267, side: 198, up: -70, size: 'S', kind: 'green' },
+  { gap: 0, side: -15, up: -55, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: 411, up: -90, size: 'HAZ', kind: 'red' },
+  { gap: 2087, side: -250, up: 85, size: 'L', kind: 'green' },
+  { gap: 2544, side: 410, up: -115, size: 'XL', kind: 'green' },
+  { gap: 4676, side: -200, up: 65, size: 'XS', kind: 'green' },
+  { gap: 0, side: -391, up: 80, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: -9, up: 45, size: 'HAZ', kind: 'red' },
+  { gap: 1791, side: 360, up: -95, size: 'S', kind: 'green' },
+  { gap: 0, side: 147, up: -80, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: 573, up: -115, size: 'HAZ', kind: 'red' },
+  { gap: 2500, side: -280, up: 120, size: 'L', kind: 'green' },
+  { gap: 3305, side: 440, up: -55, size: 'S', kind: 'green' },
+  { gap: 0, side: 227, up: -40, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: 653, up: -75, size: 'HAZ', kind: 'red' },
+  { gap: 3003, side: -190, up: 105, size: 'L', kind: 'green' },
+  { gap: 1397, side: 330, up: -70, size: 'L', kind: 'green' },
+  { gap: 3861, side: -250, up: 85, size: 'M', kind: 'green' },
+  { gap: 0, side: -1, up: 115, size: 'HAZ', kind: 'red' },
+  { gap: 5199, side: 410, up: -115, size: 'XL', kind: 'green' },
+  { gap: 2227, side: -200, up: 65, size: 'L', kind: 'green' },
+];
+/**
+ * Route 3's rings: the lateral offsets pulled ~30% toward the centerline and
+ * the vertical offsets widened ~40% — less weaving, more climbing and diving.
+ * Again the same 23 stations and sizes, so all three routes score the same.
+ */
+const RINGS_3: RingSpec[] = [
+  { gap: 0, side: 27, up: 176, size: 'M', kind: 'green' },
+  { gap: 0, side: -148, up: 260, size: 'HAZ', kind: 'red' },
+  { gap: 4419, side: -139, up: -196, size: 'S', kind: 'green' },
+  { gap: 0, side: 10, up: -154, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: -288, up: -160, size: 'HAZ', kind: 'red' },
+  { gap: 1543, side: 175, up: 238, size: 'L', kind: 'green' },
+  { gap: 3442, side: -287, up: -140, size: 'XL', kind: 'green' },
+  { gap: 3456, side: 140, up: 182, size: 'XS', kind: 'green' },
+  { gap: 0, side: 274, up: 224, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: 6, up: 126, size: 'HAZ', kind: 'red' },
+  { gap: 2423, side: -252, up: -266, size: 'S', kind: 'green' },
+  { gap: 0, side: -103, up: -110, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: -401, up: -90, size: 'HAZ', kind: 'red' },
+  { gap: 1848, side: 196, up: 336, size: 'L', kind: 'green' },
+  { gap: 4471, side: -308, up: -154, size: 'S', kind: 'green' },
+  { gap: 0, side: -159, up: -112, size: 'HAZ', kind: 'red' },
+  { gap: 0, side: -457, up: -210, size: 'HAZ', kind: 'red' },
+  { gap: 2219, side: 133, up: 294, size: 'L', kind: 'green' },
+  { gap: 1889, side: -231, up: 30, size: 'L', kind: 'green' },
+  { gap: 2853, side: 175, up: 238, size: 'M', kind: 'green' },
+  { gap: 0, side: 1, up: 322, size: 'HAZ', kind: 'red' },
+  { gap: 3843, side: -287, up: -160, size: 'XL', kind: 'green' },
+  { gap: 3013, side: 140, up: 182, size: 'L', kind: 'green' },
+];
+
+/**
+ * THE ROUTES, three per region. Keys 1 / 2 / 3 switch between them in flight
+ * (after the participant has logged in); each switch rebuilds the rings and
+ * starts that route's score from zero — the participant never re-enters their
+ * details.
+ *
+ *   start / end = the course centerline's endpoints. `alt` is height above sea
+ *     level (m): the centerline runs straight between them, so the pair also
+ *     sets how the course climbs. The last ring lands exactly on `end`, and the
+ *     altitudes are chosen so the rings clear the terrain in between.
+ *   rings = that route's own ring table (RINGS_1 / RINGS_2 / RINGS_3, above).
+ *     The tables are SHARED by both regions, so editing one changes that route
+ *     in the north and in the south alike.
+ */
+interface GeoPoint { lat: number; lon: number; alt: number }
+interface Route { name: string; start: GeoPoint; end: GeoPoint; rings: RingSpec[] }
+interface Region { id: RegionId; label: string; anchor: { lat: number; lon: number }; routes: Route[] }
+
+const REGIONS: Record<RegionId, Region> = {
+  north: {
+    id: 'north',
+    label: 'North',
+    anchor: { lat: 33.24206139858175, lon: 35.57500193888974 },
+    routes: [
+      {
+        // North of Kiryat Shmona -> north of Lake Qaraoun. The original course.
+        name: 'Route 1',
+        start: { lat: 33.24206139858175, lon: 35.57500193888974, alt: 600 },
+        end: { lat: 33.74957984835403, lon: 35.62881758358311, alt: 1800 },
+        rings: RINGS_1,
+      },
+      {
+        // Starts high on the Hermon's western slopes, runs north up the Bekaa.
+        name: 'Route 2',
+        start: { lat: 33.30315436941508, lon: 35.71088091141093, alt: 1820 },
+        end: { lat: 33.6213440989546, lon: 35.74088402818536, alt: 1800 },
+        rings: RINGS_2,
+      },
+      {
+        // Same start as route 1, but ends further east and ~1200 m higher up.
+        name: 'Route 3',
+        start: { lat: 33.24206139858175, lon: 35.57500193888974, alt: 600 },
+        end: { lat: 33.683902024452436, lon: 35.69045560640456, alt: 2300 },
+        rings: RINGS_3,
+      },
+    ],
+  },
+  south: {
+    id: 'south',
+    label: 'South',
+    anchor: { lat: 29.639129635266595, lon: 34.92709481959459 },
+    // All three southern routes leave the SAME point in the Eilat mountains:
+    // route 1 runs 25 km north, route 2 25 km east, route 3 25 km west. The
+    // start altitudes differ because the ground east of the start is far higher.
+    routes: [
+      {
+        name: 'Route 1',
+        start: { lat: 29.639129635266595, lon: 34.92709481959459, alt: 1100 },
+        end: { lat: 29.86370742901435, lon: 34.92709481959459, alt: 1200 },
+        rings: RINGS_1,
+      },
+      {
+        name: 'Route 2',
+        start: { lat: 29.639129635266595, lon: 34.92709481959459, alt: 1500 },
+        end: { lat: 29.6391296352666, lon: 35.18548046458278, alt: 1500 },
+        rings: RINGS_2,
+      },
+      {
+        name: 'Route 3',
+        start: { lat: 29.639129635266595, lon: 34.92709481959459, alt: 1200 },
+        end: { lat: 29.6391296352666, lon: 34.66870917460641, alt: 1300 },
+        rings: RINGS_3,
+      },
+    ],
+  },
+};
+
+/** The region being flown; chosen on the login screen before the run starts. */
+let regionId: RegionId = 'north';
+const region = (): Region => REGIONS[regionId];
+const routes = (): Route[] => REGIONS[regionId].routes;
+
+/** The route currently flown — index into the active region's routes. */
+let routeIndex = 0;
+
 const COLOR_TARGET = 0x00e5ff; // bright cyan-blue — fly through these (stands out against the sky)
 const COLOR_HAZARD = 0xe23a3a; // red — avoid these (drawn as squares)
+const COLOR_START = 0xffc53d; // amber — the start gate, before it is crossed
+const COLOR_START_DONE = 0x6b5518; // dimmed amber — start gate already crossed
 const COLOR_DONE = 0x24507f; // dimmed blue — a target already flown through
 const COLOR_MISS = 0xb23b3b; // a green target that was missed
+
+/**
+ * TARGET-BOARD SCORING — a green ring's award depends on HOW CLOSE to its
+ * centre you cross, like the rings of a target. Crossing anywhere inside
+ * BULLSEYE_FRACTION of the radius scores the ring's full value; from there the
+ * award falls off linearly to RIM_SHARE of it right at the rim. So a ring's
+ * listed points are its best case, reached only by flying through the middle.
+ * Red hazards are unaffected — entering one costs the full HAZARD_POINTS
+ * wherever it is crossed.
+ */
+const BULLSEYE_FRACTION = 0.2; // inner 20% of the radius = a perfect hit
+const RIM_SHARE = 0.3; // share of the full value awarded at the very rim
 
 /** Scoring. Missing a green ring costs nothing; red hazards use HAZARD_POINTS. */
 const CRASH_PENALTY = -30; // crashed and continued with E
@@ -157,6 +365,16 @@ const crashEl = document.getElementById('crash')!;
 const scorebarEl = document.getElementById('scorebar')!;
 const scoreValEl = document.getElementById('scoreVal')!;
 const ringsValEl = document.getElementById('ringsVal')!;
+const routeValEl = document.getElementById('routeVal')!;
+const pauseEl = document.getElementById('pause')!;
+const pauseTitleEl = document.getElementById('pauseTitle')!;
+const pauseInfoEl = document.getElementById('pauseInfo')!;
+const pauseYesEl = document.getElementById('pauseYes') as HTMLButtonElement;
+const pauseNoEl = document.getElementById('pauseNo') as HTMLButtonElement;
+const finishEl = document.getElementById('finish')!;
+const finishInfoEl = document.getElementById('finishInfo')!;
+const downloadCsvEl = document.getElementById('downloadCsv') as HTMLButtonElement;
+const regionBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('.segBtn'));
 const spdTapeEl = document.getElementById('spdTape') as HTMLCanvasElement;
 const altTapeEl = document.getElementById('altTape') as HTMLCanvasElement;
 const compassEl = document.getElementById('compass') as HTMLCanvasElement;
@@ -182,23 +400,33 @@ renderer.setClearColor(SKY);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, 1, 1, 400_000);
 
-const world = worldFromLatLon(START.lat, START.lon);
-world.skirtOverlap = new Array(ZOOM_LEVELS).fill(1.01);
-world.maxZoom = 17; // extra imagery/height detail over the course
+/** World config for a region: anchored on its own point, with extra detail. */
+function worldFor(r: Region): WorldConfig {
+  const w = worldFromLatLon(r.anchor.lat, r.anchor.lon);
+  w.skirtOverlap = new Array(ZOOM_LEVELS).fill(1.01);
+  w.maxZoom = 17; // extra imagery/height detail over the course
+  return w;
+}
 
-const terrain = new Terrain(
-  camera,
-  {
-    world,
-    rendering: {
-      fogColor: SKY,
-            ambient: new THREE.Color().setRGB(150 / 255, 150 / 255, 150 / 255, THREE.SRGBColorSpace),
-      sunScale: 0.35,
+function makeTerrain(w: WorldConfig): Terrain {
+  return new Terrain(
+    camera,
+    {
+      world: w,
+      rendering: {
+        fogColor: SKY,
+        ambient: new THREE.Color().setRGB(150 / 255, 150 / 255, 150 / 255, THREE.SRGBColorSpace),
+        sunScale: 0.35,
+      },
+      network: { concurrency: 8 },
     },
-    network: { concurrency: 8 },
-  },
-  scene,
-);
+    scene,
+  );
+}
+
+// Re-anchored when the region changes (see `selectRegion`), so these are `let`.
+let world = worldFor(region());
+let terrain = makeTerrain(world);
 
 /**
  * Absolute (rebase-independent) world position of a geographic coordinate,
@@ -225,6 +453,12 @@ interface Ring {
   mesh: THREE.Mesh;
   halo: THREE.Mesh;
   done: boolean; // already flown through (scored or penalized) — ignore after
+  isStart: boolean; // the start gate: scores nothing, starts the run's clock
+  /** Rectangular rings (the start gate) carry their half-sizes; a crossing is
+   *  "through" when it falls inside this box rather than inside `radius`. */
+  halfW?: number;
+  halfH?: number;
+  baseColor: number; // colour when untouched (restored on a reset)
 }
 
 /** Group holds every ring; its position tracks the large-world offset. */
@@ -232,15 +466,70 @@ const ringGroup = new THREE.Group();
 scene.add(ringGroup);
 
 const rings: Ring[] = [];
+/**
+ * MEASUREMENT of one route attempt. The clock runs from the moment the start
+ * gate's plane is crossed until Esc is pressed, and nothing else is timed: the
+ * lead-in before the gate, and any time spent in the pause dialog, are excluded.
+ *   runStartedAt — when the clock last started ticking (null = not ticking)
+ *   runMs        — time already banked from earlier ticking stretches
+ *   crashes      — crashes during this attempt
+ */
+let runStartedAt: number | null = null;
+let runMs = 0;
+let crashes = 0;
+/** Whether the start gate has been crossed on this attempt. */
+let runArmed = false;
+/** Seconds measured so far on this attempt. */
+function courseElapsed(): number {
+  return (runMs + (runStartedAt === null ? 0 : performance.now() - runStartedAt)) / 1000;
+}
+/** Stop the clock, banking the time run so far. */
+function holdClock(): void {
+  if (runStartedAt !== null) { runMs += performance.now() - runStartedAt; runStartedAt = null; }
+}
+/** Start/resume the clock (only once the gate has been crossed). */
+function resumeClock(): void {
+  if (runArmed && runStartedAt === null) runStartedAt = performance.now();
+}
+/** Clear the whole measurement — a fresh attempt at a route. */
+function clearRun(): void {
+  runStartedAt = null; runMs = 0; crashes = 0; runArmed = false;
+}
+
+/** One finished route attempt — a row in the exported CSV. */
+interface RunRow {
+  name: string; subject: string; region: RegionId; route: number;
+  seconds: number; crashes: number; score: number; rings: number; targets: number;
+}
+const sessionRows: RunRow[] = [];
 /** Total number of green target rings (red hazards are excluded from the tally). */
 let totalTargets = 0;
 /** Constant course direction; every ring's opening faces along it (nose-on). */
 const courseNormal = new THREE.Vector3(0, 0, -1);
 /** Absolute centerline start of the course (spawn reference). */
 const courseStart = new THREE.Vector3();
+/** The course's horizontal "right" axis — used to test rectangular rings. */
+const courseRight = new THREE.Vector3(1, 0, 0);
 
 /** A flat square "annulus" (a square frame / square ring) in the XY plane, for
  *  the red hazards — same footprint as a circle of the given half-size. */
+function rectAnnulus(outW: number, outH: number, inW: number, inH: number): THREE.ShapeGeometry {
+  const shape = new THREE.Shape();
+  shape.moveTo(-outW, -outH);
+  shape.lineTo(outW, -outH);
+  shape.lineTo(outW, outH);
+  shape.lineTo(-outW, outH);
+  shape.closePath();
+  const hole = new THREE.Path();
+  hole.moveTo(-inW, -inH);
+  hole.lineTo(-inW, inH);
+  hole.lineTo(inW, inH);
+  hole.lineTo(inW, -inH);
+  hole.closePath();
+  shape.holes.push(hole);
+  return new THREE.ShapeGeometry(shape);
+}
+
 function squareAnnulus(outerHalf: number, innerHalf: number): THREE.ShapeGeometry {
   const shape = new THREE.Shape();
   shape.moveTo(-outerHalf, -outerHalf);
@@ -258,9 +547,29 @@ function squareAnnulus(outerHalf: number, innerHalf: number): THREE.ShapeGeometr
   return new THREE.ShapeGeometry(shape);
 }
 
-function buildCourse(): void {
-  const a = worldPoint(world, PATH_START.lat, PATH_START.lon, PATH_START.alt);
-  const b = worldPoint(world, PATH_END.lat, PATH_END.lon, PATH_END.alt);
+/** Drop the current route's rings (geometry included) before building another. */
+function clearCourse(): void {
+  for (const ring of rings) {
+    ringGroup.remove(ring.mesh);
+    ring.mesh.geometry.dispose();
+    (ring.mesh.material as THREE.Material).dispose();
+    ring.halo.geometry.dispose();
+    (ring.halo.material as THREE.Material).dispose();
+  }
+  rings.length = 0;
+  totalTargets = 0;
+}
+
+function buildCourse(route: Route): void {
+  clearCourse();
+  const a = worldPoint(world, route.start.lat, route.start.lon, route.start.alt);
+  const b = worldPoint(world, route.end.lat, route.end.lon, route.end.alt);
+  /** Distance (m) from the course start to the LAST station: the straight-line
+   *  distance to the route's end, so the course finishes exactly on it. The
+   *  gaps below are stretched proportionally to fill it — deleting rows spreads
+   *  the remaining rings out, adding rows packs them tighter. Rings sharing a
+   *  station (gap 0) stay side by side. */
+  const courseEnd = b.distanceTo(a);
 
   // Every ring faces along the straight centerline (the opening squares up to
   // the aircraft's nose); the per-ring side/up offsets below only shift the
@@ -269,6 +578,7 @@ function buildCourse(): void {
   courseStart.copy(a);
   const up = new THREE.Vector3(0, 1, 0);
   const right = new THREE.Vector3(-courseNormal.z, 0, courseNormal.x).normalize();
+  courseRight.copy(right);
   const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), courseNormal);
   // Squares need an explicit in-plane orientation (edges level with right/up),
   // which a circle didn't care about.
@@ -277,15 +587,16 @@ function buildCourse(): void {
     new THREE.Matrix4().makeBasis(right, upInPlane, courseNormal),
   );
 
-  // Place each ring from COURSE: walk along the centerline by `gap`, then step
+  // Place each ring from the route's table: walk along the centerline by
+  // `gap`, then step
   // `side` (right/left) and `up` (above/below) off the line.
   // First station a fixed flight time from the spawn; the remaining gaps are
-  // stretched so the last station lands exactly on COURSE_END.
-  const firstAlong = FIRST_RING_SECONDS * SPEED_START - SPAWN_BACK;
-  const restGaps = COURSE.slice(1).reduce((sum, spec) => sum + spec.gap, 0);
-  const gapScale = (COURSE_END - firstAlong) / restGaps;
+  // stretched so the last station lands exactly on the route's end.
+  const firstAlong = FIRST_RING_ALONG;
+  const restGaps = route.rings.slice(1).reduce((sum, spec) => sum + spec.gap, 0);
+  const gapScale = (courseEnd - firstAlong) / restGaps;
   let along = 0;
-  for (const [i, spec] of COURSE.entries()) {
+  for (const [i, spec] of route.rings.entries()) {
     along += i === 0 ? firstAlong : spec.gap * gapScale;
     const radius = SIZE_RADIUS[spec.size];
     const hazard = spec.kind === 'red';
@@ -297,29 +608,60 @@ function buildCourse(): void {
       .addScaledVector(up, spec.up);
 
     const color = hazard ? COLOR_HAZARD : COLOR_TARGET;
-    const tube = Math.max(6, radius * 0.07);
-    // Blue targets = round (torus + ring fill); red hazards = square, same size.
-    const outlineGeo = hazard
-      ? squareAnnulus(radius + tube, radius - tube)
-      : new THREE.TorusGeometry(radius, tube, 16, 44);
-    const fillGeo = hazard
-      ? squareAnnulus(radius * 0.94, radius * 0.18)
-      : new THREE.RingGeometry(radius * 0.18, radius * 0.94, 44);
-    const mesh = new THREE.Mesh(
-      outlineGeo,
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, side: THREE.DoubleSide }),
-    );
-    mesh.quaternion.copy(hazard ? quatSquare : quat); // opening faces down the course
-    mesh.position.copy(center);
-    ringGroup.add(mesh);
-    const halo = new THREE.Mesh(
-      fillGeo,
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, side: THREE.DoubleSide }),
-    );
-    mesh.add(halo);
-    rings.push({ center, s: along, radius, points, hazard, mesh, halo, done: false });
+    addRing(center, along, radius, points, hazard, false, color, quat, quatSquare);
     if (!hazard) totalTargets++;
   }
+
+  // The start gate: dead on the centerline (no side/up offset) a fixed distance
+  // before the first ring, so it is crossed without manoeuvring.
+  const gateAlong = firstAlong - START_GATE_BACK;
+  addRing(
+    a.clone().addScaledVector(courseNormal, gateAlong).addScaledVector(up, START_GATE_UP),
+    gateAlong, Math.min(START_GATE_HALF_W, START_GATE_HALF_H), 0, false, true, COLOR_START,
+    quat, quatSquare, { halfW: START_GATE_HALF_W, halfH: START_GATE_HALF_H },
+  );
+}
+
+/** Build one ring's meshes and register it. Shared by the course and the start gate. */
+function addRing(
+  center: THREE.Vector3, s: number, radius: number, points: number,
+  hazard: boolean, isStart: boolean, color: number,
+  quat: THREE.Quaternion, quatSquare: THREE.Quaternion,
+  rect?: { halfW: number; halfH: number },
+): void {
+  const tube = Math.max(6, radius * 0.07);
+  // Blue targets = round (torus + ring fill); hazards = square; the start gate
+  // = a wide rectangular frame. Squares and rectangles use `quatSquare`, which
+  // keeps their edges level with the course's right/up axes.
+  let outlineGeo: THREE.BufferGeometry;
+  let fillGeo: THREE.BufferGeometry;
+  if (rect) {
+    const bar = Math.max(14, rect.halfH * 0.07); // frame thickness
+    outlineGeo = rectAnnulus(rect.halfW + bar, rect.halfH + bar, rect.halfW - bar, rect.halfH - bar);
+    fillGeo = rectAnnulus(rect.halfW * 0.97, rect.halfH * 0.97, rect.halfW * 0.04, rect.halfH * 0.1);
+  } else if (hazard) {
+    outlineGeo = squareAnnulus(radius + tube, radius - tube);
+    fillGeo = squareAnnulus(radius * 0.94, radius * 0.18);
+  } else {
+    outlineGeo = new THREE.TorusGeometry(radius, tube, 16, 44);
+    fillGeo = new THREE.RingGeometry(radius * 0.18, radius * 0.94, 44);
+  }
+  const mesh = new THREE.Mesh(
+    outlineGeo,
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, side: THREE.DoubleSide }),
+  );
+  mesh.quaternion.copy(hazard || rect ? quatSquare : quat); // opening faces down the course
+  mesh.position.copy(center);
+  ringGroup.add(mesh);
+  const halo = new THREE.Mesh(
+    fillGeo,
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, side: THREE.DoubleSide }),
+  );
+  mesh.add(halo);
+  rings.push({
+    center, s, radius, points, hazard, mesh, halo, done: false, isStart, baseColor: color,
+    halfW: rect?.halfW, halfH: rect?.halfH,
+  });
 }
 
 function setRingColor(ring: Ring, color: number): void {
@@ -327,17 +669,30 @@ function setRingColor(ring: Ring, color: number): void {
   (ring.halo.material as THREE.MeshBasicMaterial).color.set(color);
 }
 
+/**
+ * What a ring is worth for a crossing `miss` of the way out from its centre
+ * (0 = dead centre, 1 = on the rim). Full value inside the bullseye, then a
+ * linear fall-off to RIM_SHARE of it; never less than 1 point.
+ */
+function ringAward(ring: Ring, miss: number): number {
+  if (ring.hazard) return ring.points; // a hazard costs the same wherever it is hit
+  const t = Math.min(1, Math.max(0, (miss - BULLSEYE_FRACTION) / (1 - BULLSEYE_FRACTION)));
+  return Math.max(1, Math.round(ring.points * (1 - (1 - RIM_SHARE) * t)));
+}
+
 /** Flew THROUGH a ring: score a green target or penalize a red hazard. */
-function passRing(ring: Ring): void {
+function passRing(ring: Ring, miss: number): void {
   ring.done = true;
-  score += ring.points;
+  if (ring.isStart) { startRun(ring); return; }
+  const award = ringAward(ring, miss);
+  score += award;
   if (ring.hazard) {
     setRingColor(ring, 0x7a2020); // red entered by mistake
-    showPop(`${ring.points}`, '#ff6b6b'); // "-10"
+    showPop(`${award}`, '#ff6b6b'); // "-10"
   } else {
     setRingColor(ring, COLOR_DONE);
     targetsCleared++;
-    showPop(`+${ring.points}`, HUD_GREEN);
+    showPop(`+${award}`, HUD_GREEN);
   }
   updateScore();
 }
@@ -345,7 +700,19 @@ function passRing(ring: Ring): void {
 /** Crossed a ring's plane outside it. No penalty: a missed green is just marked, a red is safely dodged. */
 function skipRing(ring: Ring): void {
   ring.done = true;
+  // The start gate is a measurement trigger, not a target: the run begins the
+  // moment its plane is crossed, even if the pilot went around the rim.
+  if (ring.isStart) { startRun(ring); return; }
   if (!ring.hazard) setRingColor(ring, COLOR_MISS);
+}
+
+/** Crossed the start gate — the run (and everything measured about it) begins. */
+function startRun(gate: Ring): void {
+  runArmed = true;
+  runMs = 0;
+  runStartedAt = performance.now();
+  setRingColor(gate, COLOR_START_DONE);
+  showPop('GO', '#ffc53d');
 }
 
 let popTimer = 0;
@@ -374,6 +741,7 @@ const flight = {
 function updateScore(): void {
   scoreValEl.textContent = String(score);
   ringsValEl.textContent = `${targetsCleared} / ${totalTargets}`;
+  routeValEl.textContent = String(routeIndex + 1);
 }
 
 function resetCamera(): void {
@@ -405,6 +773,7 @@ window.addEventListener('resize', resize);
 
 function crash(): void {
   flight.crashed = true;
+  crashes++;
   crashEl.style.display = 'block';
 }
 
@@ -420,16 +789,29 @@ function resetRun(): void {
   flight.throttle = THROTTLE_START;
   score = 0;
   targetsCleared = 0;
+  clearRun(); // a restart is a fresh attempt: clock, crashes and gate all reset
   for (const ring of rings) {
     ring.done = false;
-    const color = ring.hazard ? COLOR_HAZARD : COLOR_TARGET;
-    (ring.mesh.material as THREE.MeshBasicMaterial).color.set(color);
-    (ring.halo.material as THREE.MeshBasicMaterial).color.set(color);
+    setRingColor(ring, ring.baseColor);
   }
   updateScore();
   havePrev = false; // drop the stale ring-crossing history after the jump
   resetCamera();
   crashEl.style.display = 'none';
+}
+
+/**
+ * Switch to another route (keys 1 / 2 / 3). The participant stays signed in:
+ * only the rings are rebuilt and the score starts again from zero, so the same
+ * pilot can fly all three routes one after another. Pressing the key of the
+ * route already being flown does nothing (use R to restart a run).
+ */
+function switchRoute(index: number): void {
+  if (index === routeIndex || index < 0 || index >= routes().length) return;
+  routeIndex = index;
+  buildCourse(routes()[routeIndex]);
+  resetRun(); // zeroes the score, the clock and the crash count for the new route
+  showPop(routes()[routeIndex].name, CMP_COLOR_TARGET);
 }
 
 /**
@@ -464,6 +846,9 @@ const keys = new Set<string>();
 const justPressed = new Set<string>();
 window.addEventListener('keydown', (e) => {
   if (!started) return;
+  // Esc stops the route; it is handled here rather than in the frame loop
+  // because the loop stops stepping as soon as the simulator is paused.
+  if (e.code === 'Escape') { e.preventDefault(); if (!paused) pauseRoute(); return; }
   if (!keys.has(e.code)) justPressed.add(e.code);
   keys.add(e.code);
 });
@@ -519,15 +904,29 @@ canvas.addEventListener('touchcancel', touchEnd, { passive: false });
 
 // -- input: gamepad (Thrustmaster HOTAS Warthog) -----------------------------
 
-/** Warthog is two devices — split them by id (throttle's id has GP_THROTTLE_ID). */
+/** The USB product id a browser reports inside a gamepad's name, e.g. "0404". */
+function padProduct(p: Gamepad): string | null {
+  return /product:\s*([0-9a-f]{4})/i.exec(p.id)?.[1]?.toLowerCase() ?? null;
+}
+
+/** Is this device the throttle? By product id first, then by name. */
+function isThrottlePad(p: Gamepad): boolean {
+  const product = padProduct(p);
+  if (product && GP_THROTTLE_PRODUCTS.includes(product)) return true;
+  if (product && GP_STICK_PRODUCTS.includes(product)) return false;
+  return p.id.toLowerCase().includes(GP_THROTTLE_ID);
+}
+
+/** A HOTAS is two devices on two USB ports — sort them into stick and throttle. */
 function warthogPads(): { stick: Gamepad | null; throttle: Gamepad | null } {
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   let stick: Gamepad | null = null;
   let throttle: Gamepad | null = null;
   for (const p of pads) {
     if (!p) continue;
-    if (p.id.toLowerCase().includes(GP_THROTTLE_ID)) throttle = p;
-    else stick = p;
+    if (isThrottlePad(p)) { throttle ??= p; continue; }
+    // Prefer the configured stick when more than one is connected.
+    if (!stick || padProduct(p) === GP_STICK_PREFERRED) stick = p;
   }
   return { stick, throttle };
 }
@@ -535,8 +934,32 @@ function warthogPads(): { stick: Gamepad | null; throttle: Gamepad | null } {
 // checked/adjusted against what this machine actually reports (open the console).
 window.addEventListener('gamepadconnected', (e) => {
   const g = e.gamepad;
-  console.log(`[gamepad] "${g.id}" — ${g.axes.length} axes, ${g.buttons.length} buttons (index ${g.index})`);
+  const role = isThrottlePad(g) ? 'THROTTLE' : 'STICK';
+  console.log(`[gamepad] ${role}: "${g.id}" — ${g.axes.length} axes, ${g.buttons.length} buttons (index ${g.index})`);
 });
+
+/**
+ * Axis probe. While the login screen is still up, every axis that moves is
+ * logged with its device and index — so a new stick can be mapped by waggling
+ * it and reading the console, instead of guessing the numbering. It stops the
+ * moment the run starts, so it never logs during a flight.
+ */
+const gpProbe = new Map<string, number[]>();
+function probeGamepads(): void {
+  if (started) return;
+  for (const p of navigator.getGamepads ? navigator.getGamepads() : []) {
+    if (!p) continue;
+    const last = gpProbe.get(p.id) ?? Array.from(p.axes, () => 0);
+    for (let i = 0; i < p.axes.length; i++) {
+      if (Math.abs(p.axes[i] - last[i]) > 0.35) {
+        const role = isThrottlePad(p) ? 'THROTTLE' : 'STICK';
+        console.log(`[gamepad] ${role} "${p.id}" → axis ${i} = ${p.axes[i].toFixed(2)}`);
+        last[i] = p.axes[i];
+      }
+    }
+    gpProbe.set(p.id, last);
+  }
+}
 
 /** Read an axis by index, 0 if that axis doesn't exist on this device. */
 const axis = (a: readonly number[], i: number): number => (i < a.length ? a[i] : 0);
@@ -610,6 +1033,17 @@ const camAbs = new THREE.Vector3();
 const prevCamAbs = new THREE.Vector3();
 const crossing = new THREE.Vector3();
 let havePrev = false;
+/** Is `crossing` inside the ring's opening? Circles use the radius, the
+ *  rectangular start gate its own half-sizes. */
+const _ringLocal = new THREE.Vector3();
+function insideRing(ring: Ring): boolean {
+  if (ring.halfW === undefined || ring.halfH === undefined) {
+    return crossing.distanceTo(ring.center) <= ring.radius;
+  }
+  _ringLocal.copy(crossing).sub(ring.center);
+  return Math.abs(_ringLocal.dot(courseRight)) <= ring.halfW && Math.abs(_ringLocal.y) <= ring.halfH;
+}
+
 function ringCheck(): void {
   // Absolute camera position = user-space − worldOffset (rebase-independent).
   camAbs.copy(camera.position).sub(terrain.anchor.worldOffset);
@@ -623,7 +1057,7 @@ function ringCheck(): void {
     if ((fPrev <= 0 && fCur > 0) || (fPrev >= 0 && fCur < 0)) {
       const t = fPrev / (fPrev - fCur); // param of plane crossing along the step
       crossing.lerpVectors(prevCamAbs, camAbs, t);
-      if (crossing.distanceTo(ring.center) <= ring.radius) passRing(ring); // through it
+      if (insideRing(ring)) passRing(ring, crossing.distanceTo(ring.center) / ring.radius);
       else skipRing(ring); // crossed its depth outside the rim → miss/dodge
     }
   }
@@ -641,6 +1075,12 @@ function revealUpdate(): void {
   let nextS = Infinity;
   for (const ring of rings) if (!ring.done && ring.s < nextS) nextS = ring.s;
   for (const ring of rings) {
+    if (ring.isStart) { // always solid until crossed — it must never be missed
+      const op = ring.done ? 0 : 1;
+      (ring.mesh.material as THREE.MeshBasicMaterial).opacity = op;
+      (ring.halo.material as THREE.MeshBasicMaterial).opacity = op * 0.12;
+      continue;
+    }
     const ahead = ring.s - sPlane;
     let op: number;
     if (ahead < -80) op = 0; // just passed → gone
@@ -1117,6 +1557,107 @@ function drawAttitude(): void {
 }
 const _WORLD_UP = new THREE.Vector3(0, 1, 0);
 
+// -- pause, route hand-over and the session's data ---------------------------
+
+/** True while Esc has frozen the simulator and the dialog is up. */
+let paused = false;
+/** True once all three routes are done — the session is over. */
+let sessionDone = false;
+
+/**
+ * Esc — stop this route. The simulator freezes exactly where it is (nothing is
+ * stepped while `paused`), the clock stops, and the participant is asked
+ * whether to move on. Answering "No" resumes from the identical state.
+ */
+function pauseRoute(): void {
+  if (!started || paused || sessionDone) return;
+  holdClock();
+  paused = true;
+  const r = routes()[routeIndex];
+  pauseTitleEl.textContent = `${r.name} stopped`;
+  pauseInfoEl.textContent = runArmed
+    ? `Time ${courseElapsed().toFixed(1)} s · score ${score} · rings ${targetsCleared}/${totalTargets} · crashes ${crashes}`
+    : 'The start gate has not been crossed yet, so nothing was measured on this route.';
+  pauseEl.classList.add('is-open');
+}
+
+/** "No" — carry on exactly where the aircraft was frozen. */
+function resumeRoute(): void {
+  paused = false;
+  pauseEl.classList.remove('is-open');
+  resumeClock();
+  last = performance.now(); // don't bill the paused wall-clock to the physics
+  canvas.focus();
+}
+
+/** "Yes" — bank this route's row, then move to the next one (or finish). */
+function nextRoute(): void {
+  pauseEl.classList.remove('is-open');
+  paused = false;
+  recordRoute();
+  if (routeIndex < routes().length - 1) {
+    switchRoute(routeIndex + 1);
+    last = performance.now();
+    canvas.focus();
+  } else {
+    sessionDone = true;
+    finishInfoEl.textContent = sessionRows
+      .map((r) => `${REGIONS[r.region].label} route ${r.route}: ${r.seconds.toFixed(1)} s · score ${r.score} · rings ${r.rings}/${r.targets} · crashes ${r.crashes}`)
+      .join('\n');
+    finishEl.classList.add('is-open');
+  }
+}
+
+/** Append the finished attempt to the session, and back it up locally. */
+function recordRoute(): void {
+  sessionRows.push({
+    name: participant?.name ?? '',
+    subject: participant?.subject ?? '',
+    region: regionId,
+    route: routeIndex + 1,
+    seconds: courseElapsed(),
+    crashes,
+    score,
+    rings: targetsCleared,
+    targets: totalTargets,
+  });
+  // A copy in localStorage, so a refresh or a closed tab cannot lose the data.
+  try {
+    localStorage.setItem('flightsim.session', JSON.stringify(sessionRows));
+  } catch { /* private mode / storage disabled — the in-memory rows still stand */ }
+}
+
+const CSV_HEADER = ['name', 'subject_id', 'region', 'route', 'seconds', 'crashes', 'score', 'rings_passed', 'rings_total'];
+/** RFC-4180 quoting: wrap in quotes and double any quote inside. */
+function csvCell(v: string | number): string {
+  const t = String(v);
+  return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+}
+function sessionCsv(): string {
+  const rows = sessionRows.map((r) => [
+    r.name, r.subject, r.region, r.route, r.seconds.toFixed(2), r.crashes, r.score, r.rings, r.targets,
+  ].map(csvCell).join(','));
+  return [CSV_HEADER.join(','), ...rows].join('\r\n') + '\r\n';
+}
+
+function downloadCsv(): void {
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const safe = (participant?.subject || 'participant').replace(/[^\w-]/g, '_');
+  const blob = new Blob([sessionCsv()], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `flight-${safe}-${regionId}-${stamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+pauseYesEl.addEventListener('click', nextRoute);
+pauseNoEl.addEventListener('click', resumeRoute);
+downloadCsvEl.addEventListener('click', downloadCsv);
+
 // -- frame loop --------------------------------------------------------------
 
 const PHYS_DT = 1 / 120; // fixed physics step — decoupled from the render rate
@@ -1126,10 +1667,14 @@ function frame(now: number): void {
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
 
-  if (started) {
+  if (started && !paused && !sessionDone) {
     // R (any layout — it's the physical key) or a post-crash tap restarts the
     // run from the start of the course; it never returns to the login screen.
     if (justPressed.has('KeyR') || tapReset) resetRun();
+    // 1 / 2 / 3 (top row or numpad) swap routes without a new login.
+    else if (justPressed.has('Digit1') || justPressed.has('Numpad1')) switchRoute(0);
+    else if (justPressed.has('Digit2') || justPressed.has('Numpad2')) switchRoute(1);
+    else if (justPressed.has('Digit3') || justPressed.has('Numpad3')) switchRoute(2);
     // E is the physical key (KeyE), so it works on Hebrew (ק) and English layouts.
     else if (flight.crashed && justPressed.has('KeyE')) continueAfterCrash();
     // Sample inputs once, then advance the physics in fixed PHYS_DT sub-steps so
@@ -1151,6 +1696,7 @@ function frame(now: number): void {
   terrain.update();
   revealUpdate();
   loadingUi();
+  probeGamepads();
 
   if (popTimer > 0) {
     popTimer -= dt;
@@ -1183,15 +1729,46 @@ function startSimulation(): void {
   canvas.focus();
 }
 
+/**
+ * Pick a region on the login screen. The world is re-anchored on the spot and
+ * the new terrain starts streaming straight away, so by the time the
+ * participant has typed their details the map is usually ready; the Start
+ * button keeps showing the progress either way. Only selectable before the run
+ * begins — the anchor cannot move once the participant is flying.
+ */
+function selectRegion(id: RegionId): void {
+  if (started || id === regionId) return;
+  regionId = id;
+  routeIndex = 0;
+  for (const b of regionBtns) {
+    const on = b.dataset.region === id;
+    b.classList.toggle('is-on', on);
+    b.setAttribute('aria-checked', String(on));
+  }
+  // Drop the old region's terrain and re-anchor on the new one.
+  clearCourse();
+  terrain.dispose();
+  world = worldFor(region());
+  terrain = makeTerrain(world);
+  ringGroup.position.set(0, 0, 0); // the new terrain starts at offset 0
+  buildCourse(routes()[routeIndex]);
+  resetRun();
+}
+
+for (const b of regionBtns) {
+  b.addEventListener('click', () => selectRegion(b.dataset.region as RegionId));
+}
+
 loginForm.addEventListener('submit', (e) => {
   e.preventDefault();
   if (terrain.status.loading) return; // map not ready yet (button is disabled anyway)
   const name = fullNameEl.value.trim();
   const subject = subjectIdEl.value.trim();
   if (!name) { loginErr.textContent = 'Please enter your full name.'; return; }
-  if (!subject) { loginErr.textContent = 'Please enter your subject number.'; return; }
+  if (!subject) { loginErr.textContent = 'Please enter your participant ID.'; return; }
   loginErr.textContent = '';
   participant = { name, subject };
+  sessionRows.length = 0; // a fresh session for this participant
   startSimulation();
 });
 
@@ -1200,8 +1777,8 @@ if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
 }
 
 // Anchor the world, build the course, and start rendering immediately so the
-// Kinneret terrain is already loading behind the login screen.
-buildCourse();
+// region's terrain is already loading behind the login screen.
+buildCourse(routes()[routeIndex]);
 resetCamera();
 resize();
 requestAnimationFrame(frame);
@@ -1209,5 +1786,6 @@ requestAnimationFrame(frame);
 // dev convenience: expose live state for debugging in the console
 Object.defineProperty(window, '__sim', {
   configurable: true,
-  get: () => ({ terrain, flight, camera, rings, score, participant, courseNormal, courseStart }),
+  get: () => ({ terrain, flight, camera, rings, score, participant, courseNormal, courseStart, route: routes()[routeIndex], routeIndex,
+    elapsed: courseElapsed(), crashes, runArmed, sessionRows, regionId }),
 });
